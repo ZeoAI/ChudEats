@@ -77,6 +77,9 @@ function buildCommands() {
         .setName('reopen')
         .setDescription('Reopen a closed ticket in the current channel'))
       .addSubcommand((subcommand) => subcommand
+        .setName('delete')
+        .setDescription('Permanently delete the ticket in the current channel'))
+      .addSubcommand((subcommand) => subcommand
         .setName('add')
         .setDescription('Give another member access to this ticket')
         .addUserOption((option) => option
@@ -182,3 +185,4 @@ function buildCommands() {
 }
 
 module.exports = { buildCommands };
+

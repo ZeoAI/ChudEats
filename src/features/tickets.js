@@ -30,6 +30,9 @@ const IDS = {
   closePrefix: 'ticket:close:',
   closeConfirmPrefix: 'ticket:close-confirm:',
   closeCancelPrefix: 'ticket:close-cancel:',
+  deletePrefix: 'ticket:delete:',
+  deleteConfirmPrefix: 'ticket:delete-confirm:',
+  deleteCancelPrefix: 'ticket:delete-cancel:',
   reopenPrefix: 'ticket:reopen:',
   addSubmitPrefix: 'ticket:add-submit:',
 };
@@ -129,12 +132,14 @@ function openControls(ticketId) {
     new ButtonBuilder().setCustomId(`${IDS.claimPrefix}${ticketId}`).setLabel('Claim ticket').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`${IDS.addPrefix}${ticketId}`).setLabel('Add member').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`${IDS.closePrefix}${ticketId}`).setLabel('Close ticket').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`${IDS.deletePrefix}${ticketId}`).setLabel('Delete ticket').setStyle(ButtonStyle.Danger),
   )];
 }
 
 function closedControls(ticketId) {
   return [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${IDS.reopenPrefix}${ticketId}`).setLabel('Reopen ticket').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`${IDS.deletePrefix}${ticketId}`).setLabel('Delete ticket').setStyle(ButtonStyle.Danger),
   )];
 }
 
@@ -406,6 +411,49 @@ async function closeRecord(interaction, store, ticket) {
   };
 }
 
+async function deleteRecord(interaction, store, ticket) {
+  if (!ticket) return { ok: false, reason: 'That ticket record is no longer available.' };
+  const guildConfig = store.getGuild(interaction.guildId);
+  if (!canManageTicket(interaction, guildConfig)) {
+    return { ok: false, reason: 'Only the support team can delete tickets.' };
+  }
+
+  const channel = await interaction.guild.channels.fetch(ticket.channelId).catch(() => null);
+  
+  // Build transcript before deleting
+  let transcript = null;
+  if (channel) {
+    transcript = await buildTranscript(channel, ticket);
+  }
+
+  // Log deletion to transcript channel if configured
+  if (guildConfig.tickets.transcriptChannelId) {
+    const transcriptChannel = await interaction.guild.channels.fetch(guildConfig.tickets.transcriptChannelId).catch(() => null);
+    if (transcriptChannel?.isTextBased()) {
+      const deletionLog = transcript 
+        ? [`Deleted ticket **${ticket.id}** | requester <@${ticket.userId}> | deleted by <@${interaction.user.id}> at ${new Date().toISOString()}`, transcript]
+        : [`Deleted ticket **${ticket.id}** | requester <@${ticket.userId}> | deleted by <@${interaction.user.id}> at ${new Date().toISOString()}`, '(no messages to transcribe)'];
+      
+      await transcriptChannel.send({
+        content: deletionLog[0],
+        files: transcript ? [new AttachmentBuilder(Buffer.from(transcript, 'utf8'), { name: `${ticket.id.toLowerCase()}-deleted-transcript.txt` })] : [],
+        allowedMentions: { users: [ticket.userId, interaction.user.id] },
+      }).catch(() => null);
+    }
+  }
+
+  // Delete the ticket record
+  delete store.state.tickets[ticket.id];
+  store.save();
+
+  // Delete the channel
+  if (channel) {
+    await channel.delete({ reason: `Ticket ${ticket.id} deleted by ${interaction.user.tag}` }).catch(() => null);
+  }
+
+  return { ok: true, reason: `Ticket **${ticket.id}** deleted and logged.` };
+}
+
 async function reopenRecord(interaction, store, ticket) {
   if (!ticket || ticket.status !== 'closed') return { ok: false, reason: 'This ticket is not closed.' };
   const guildConfig = store.getGuild(interaction.guildId);
@@ -433,6 +481,11 @@ async function handleCommand(interaction, store) {
     const result = await closeRecord(interaction, store, ticket);
     return interaction.editReply({ content: result.reason });
   }
+  if (subcommand === 'delete') {
+    await interaction.deferReply({ ephemeral: true });
+    const result = await deleteRecord(interaction, store, ticket);
+    return interaction.editReply({ content: result.reason });
+  }
   if (subcommand === 'reopen') {
     await interaction.deferReply({ ephemeral: true });
     const result = await reopenRecord(interaction, store, ticket);
@@ -451,7 +504,7 @@ async function handleComponent(interaction, store) {
 
   if (!interaction.isButton()) return null;
   const customId = interaction.customId;
-  const prefixes = [IDS.claimPrefix, IDS.addPrefix, IDS.closeConfirmPrefix, IDS.closeCancelPrefix, IDS.closePrefix, IDS.reopenPrefix];
+  const prefixes = [IDS.claimPrefix, IDS.addPrefix, IDS.closeConfirmPrefix, IDS.closeCancelPrefix, IDS.closePrefix, IDS.deletePrefix, IDS.deleteConfirmPrefix, IDS.deleteCancelPrefix, IDS.reopenPrefix];
   if (!prefixes.some((prefix) => customId.startsWith(prefix))) return null;
   const prefix = prefixes.find((item) => customId.startsWith(item));
   const ticket = findTicket(store, customId.slice(prefix.length));
@@ -491,6 +544,24 @@ async function handleComponent(interaction, store) {
     const result = await closeRecord(interaction, store, ticket);
     return interaction.followUp({ content: result.reason, ephemeral: true });
   }
+  if (prefix === IDS.deletePrefix) {
+    const guildConfig = store.getGuild(interaction.guildId);
+    if (!canManageTicket(interaction, guildConfig)) return interaction.reply({ content: 'Only the support team can delete tickets.', ephemeral: true });
+    return interaction.reply({
+      content: 'Permanently delete this ticket and save transcript?',
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`${IDS.deleteConfirmPrefix}${ticket.id}`).setLabel('Confirm delete').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`${IDS.deleteCancelPrefix}${ticket.id}`).setLabel('Keep ticket').setStyle(ButtonStyle.Secondary),
+      )],
+      ephemeral: true,
+    });
+  }
+  if (prefix === IDS.deleteCancelPrefix) return interaction.update({ content: 'Ticket kept.', components: [] });
+  if (prefix === IDS.deleteConfirmPrefix) {
+    await interaction.deferUpdate();
+    const result = await deleteRecord(interaction, store, ticket);
+    return interaction.followUp({ content: result.reason, ephemeral: true });
+  }
   if (prefix === IDS.reopenPrefix) {
     await interaction.deferUpdate();
     const result = await reopenRecord(interaction, store, ticket);
@@ -510,3 +581,4 @@ async function handleModal(interaction, store) {
 }
 
 module.exports = { handleCommand, handleComponent, handleModal, IDS };
+
